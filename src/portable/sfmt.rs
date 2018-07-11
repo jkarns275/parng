@@ -1,3 +1,5 @@
+#[macro_use]
+use std::simd::cfg_feature_enabled;
 use std::simd::{u32x4, u8x16};
 use std::mem::transmute;
 
@@ -50,6 +52,17 @@ const SFMT_ALTI_SL2_PERM64: u8x16 = u8x16::new(1,2,3,4,5,6,7,31,9,10,11,12,13,14
 const SFMT_ALTI_SR2_PERM: u8x16 =   u8x16::new(7,0,1,2,11,4,5,6,15,8,9,10,17,12,13,14);
 const SFMT_ALTI_SR2_PERM64: u8x16 = u8x16::new(15,0,1,2,3,4,5,6,17,8,9,10,11,12,13,14);
 
+/// Helper function to ensure code is endian-neutral
+#[inline(always)]
+#[cfg(target_endian = "big")]
+fn adjust(x: u32) -> usize { x as usize ^ 1 }
+
+/// Helper function to ensure code is endian-neutral
+#[inline(always)]
+#[cfg(target_endian = "little")]
+fn adjust(x: u32) -> usize { x as usize }
+
+
 #[derive(Copy, Clone)]
 union W128 {
     xx: u128,
@@ -60,14 +73,14 @@ union W128 {
 
 impl W128 {
     #[inline(always)]
-    pub unsafe fn mm_recursion(&mut self, a: Self, b: Self, c: Self, d: Self) {
+    unsafe fn sse_recursion(&mut self, a: Self, b: Self, c: Self, d: Self) {
         const SSE2_PARAM_MASK: W128 = W128 { ex: [SFMT_MSK1, SFMT_MSK2, SFMT_MSK3, SFMT_MSK4] };
 
         let (mut v, mut x, mut y, mut z) =
             (W128 { xx: 0 }, W128 { xx: 0 }, W128 { xx: 0 }, W128 { xx: 0 });
 
         y.mx = b.mx >> SFMT_SR1;
-        z.xx = c >> SFMT_SR2;
+        z.xx = c.xx >> SFMT_SR2;
         v.mx = d.mx >> SFMT_SL1;
         z.xx ^= a.xx;
         z.xx ^= v.xx;
@@ -77,6 +90,39 @@ impl W128 {
         z.xx ^= y.xx;
 
         self.xx = z.xx;
+    }
+
+    #[inline(always)]
+    unsafe fn non_sse_recursion(&mut self, a: Self, b: Self, c: Self, d: Self) {
+        let x = W128 { xx: a << SFMT_SL2 };
+        let y = W128 { xx: c << SFMT_SR2 };
+        if cfg!(target_endian = "little") {
+            self.ex[0] = a.ex[0] ^ x.ex[0] ^ ((b.ex[0] >> SFMT_SR1) & SFMT_MSK1)
+                ^ y.ex[0] ^ (d.u[0] << SFMT_SL1);
+            self.ex[1] = a.u[1] ^ x.ex[1] ^ ((b.ex[1] >> SFMT_SR1) & SFMT_MSK2)
+                ^ y.ex[1] ^ (d.u[1] << SFMT_SL1);
+            self.ex[2] = a.ex[2] ^ x.ex[2] ^ ((b.ex[2] >> SFMT_SR1) & SFMT_MSK3)
+                ^ y.ex[2] ^ (d.ex[2] << SFMT_SL1);
+            self.ex[3] = a.ex[3] ^ x.ex[3] ^ ((b.ex[3] >> SFMT_SR1) & SFMT_MSK4)
+                ^ y.ex[3] ^ (d.ex[3] << SFMT_SL1); 
+        } else {
+            self.ex[0] = a.ex[0] ^ x.ex[0] ^ ((b.ex[0] >> SFMT_SR1) & SFMT_MSK2)
+                ^ y.ex[0] ^ (d.u[0] << SFMT_SL1);
+            self.ex[1] = a.u[1] ^ x.ex[1] ^ ((b.ex[1] >> SFMT_SR1) & SFMT_MSK1)
+                ^ y.ex[1] ^ (d.u[1] << SFMT_SL1);
+            self.ex[2] = a.ex[2] ^ x.ex[2] ^ ((b.ex[2] >> SFMT_SR1) & SFMT_MSK4)
+                ^ y.ex[2] ^ (d.ex[2] << SFMT_SL1);
+            self.ex[3] = a.ex[3] ^ x.ex[3] ^ ((b.ex[3] >> SFMT_SR1) & SFMT_MSK3)
+                ^ y.ex[3] ^ (d.ex[3] << SFMT_SL1);        
+        }
+    }
+
+    pub fn do_recursion(&mut self, a: Self, b: Self, c: Self, d: Self) {
+        if cfg_feature_enabled!("sse2") {
+            self.sse_recursion(a, b, c, d);    
+        } else {
+            self.non_sse_recursion(a, b, c, d);
+        }
     }
 }
 
@@ -105,7 +151,6 @@ impl SFMTRng {
     }
 
     /// Guarantees that the period of the series is 2^SFMT_MEXP
-    #[cfg(target_endian = "little")]
     fn period_certification(&mut self) {
         const PARITY: [u32; 4] = [SFMT_PARITY1, SFMT_PARITY2, SFMT_PARITY3, SFMT_PARITY4];
 
@@ -114,11 +159,18 @@ impl SFMTRng {
             let mut work = 0u32;
 
             let state32 = unsafe { &mut self.state.u[..] };
-
-            inner_product ^= *state32.get_unchecked(0) & parity[0];
-            inner_product ^= *state32.get_unchecked(1) & parity[1];
-            inner_product ^= *state32.get_unchecked(2) & parity[2];
-            inner_product ^= *state32.get_unchecked(3) & parity[3];
+            
+            if cfg!(target_endian = "little") {
+                inner_product ^= *state32.get_unchecked(0) & PARITY[0];
+                inner_product ^= *state32.get_unchecked(1) & PARITY[1];
+                inner_product ^= *state32.get_unchecked(2) & PARITY[2];
+                inner_product ^= *state32.get_unchecked(3) & PARITY[3];
+            } else {
+                inner_product ^= *state32.get_unchecked(1) & PARITY[0];
+                inner_product ^= *state32.get_unchecked(0) & PARITY[1];
+                inner_product ^= *state32.get_unchecked(3) & PARITY[2];
+                inner_product ^= *state32.get_unchecked(2) & PARITY[3];
+            }
 
             let mut i = 16;
             inner_product ^= inner_product >> 16;
@@ -126,16 +178,16 @@ impl SFMTRng {
             inner_product ^= inner_product >> 4;
             inner_product ^= inner_product >> 1;
 
-            inner &= 1;
+            inner_product &= 1;
 
             /* Check OK  */
-            if inner == 1 { return }
+            if inner_product == 1 { return }
 
             for i in 0..4 {
                 work = 0;
                 for j in 0..32 {
-                    if work & parity[i] != 0 {
-                        state32[i] ^= work;
+                    if work & PARITY[i] != 0 {
+                        state32[adjust(i)] ^= work;
                         return
                     }
                     work <<= 1;
@@ -144,47 +196,27 @@ impl SFMTRng {
         }
     }
 
-    #[cfg(target_endian = "big")]
-    fn period_certification(&mut self) {
-        const PARITY: [u32; 4] = [SFMT_PARITY1, SFMT_PARITY2, SFMT_PARITY3, SFMT_PARITY4];
+    /// Fills the entire internal state with random integers.
+    fn fill_state_with_rand(&mut self) {
+        let mut i = 0;
+        let mut r1 = W128 { xx: 0 };
+        let mut r2 = W128 { xx: 0 };
 
-        // This is the same as the little endian version, except that all indices of state32 have
-        // effectively had their 1 bit flipped, to keep 64bit big-endian order or something like that?
-        unsafe {
-            let mut inner_product = 0u32;
-            let mut work = 0u32;
-
-            let state32 = unsafe { &mut self.state.u[..] };
-
-            inner_product ^= *state32.get_unchecked(1) & parity[0];
-            inner_product ^= *state32.get_unchecked(0) & parity[1];
-            inner_product ^= *state32.get_unchecked(3) & parity[2];
-            inner_product ^= *state32.get_unchecked(2) & parity[3];
-
-            let mut i = 16;
-            inner_product ^= inner_product >> 16;
-            inner_product ^= inner_product >> 8;
-            inner_product ^= inner_product >> 4;
-            inner_product ^= inner_product >> 1;
-
-            inner &= 1;
-
-            /* Check OK  */
-            if inner == 1 { return }
-
-            for i in 0..4 {
-                work = 0;
-                for j in 0..32 {
-                    if work & parity[i] != 0 {
-                        // The ^ 1 is important but i don't exactly know why.
-                        state32[i ^ 1] ^= work;
-                        return
-                    }
-                    work <<= 1;
-                }
-            }
+        let state = &mut self.state.w[..];
+        while i < (SFMT_N - SFMT_POS1) {
+            state[i].do_recursion(state[i], state[i + SFMT_POS1], r1, r2);
+            r1 = r2;
+            r2 = state[i];
+            i += 1;
+        }
+        while i < SFMT_N {
+            state[i].do_recursion(state[i], state[i + SFMT_POS1 - SFMT_N], r1, r2);
+            r1 = r2;
+            r2 = state[i];
+            i += 1;
         }
     }
+    
 }
 
 impl Rand for SFMTRng {
@@ -214,34 +246,26 @@ impl RngCore for SFMTRng {
 impl SeedableRng for SFMTRng {
     type Seed = [u8; 4];
 
-    #[cfg(target_endian = "little")]
     fn from_seed(seed: <Self as SeedableRng>::Seed) -> Self {
-        const FACTOR: u64 = 1812433253;
+        const FACTOR: u32 = 1812433253;
 
-        let seed: u32 = transmute(seed);
+        let seed: u32 = u32::from_le(unsafe { transmute(seed) });
         let mut result = Self::new_unseeded();
-        /*
-        // safe version
-
-        */
-        // unsafe version
+        
         unsafe {
             let state32 = &mut result.state.u[..];
-            state32[0] = seed;
+            state32[adjust(0)] = seed;
 
-            let mut i = 1usize;
-            while i < SFMT_N32 {
-                let new_value = FACTOR * (*state32.get_unchecked(i - 1) ^ (*state32.get_unchecked(i - 1) >> 30)) + i;
+            let mut i = 1u32;
+            while i < SFMT_N32 as u32 {
+                let new_value =
+                    FACTOR * (*state32.get_unchecked(adjust(i - 1))
+                              ^ (*state32.get_unchecked(adjust(i - 1)) >> 30)) + i;
                 i += 1;
             }
         }
         result.index = SFMT_N32;
         result.period_certification();
         result
-    }
-
-    #[cfg(target_endian = "big")]
-    fn from_seed(seed: <Self as SeedableRng>::Seed) -> Self {
-        unimplemented!()
     }
 }

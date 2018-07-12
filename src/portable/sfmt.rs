@@ -1,6 +1,4 @@
-#[macro_use]
-use std::simd::cfg_feature_enabled;
-use std::simd::{u32x4, u8x16};
+use stdsimd::simd::{u32x4, u8x16};
 use std::mem::transmute;
 
 use rand::{self, RngCore, Rng, SeedableRng, Rand};
@@ -15,13 +13,16 @@ const SFMT_MEXP: usize = 19937;
 
 /// The SFMT generator uses an internal state array of 128 bit integers - this is the size of the
 /// array.
-const SFMT_N: usize = (SFMT_MEXP / 128) + 1;
+const SFMT_N128: usize = (SFMT_MEXP / 128) + 1;
+
+/// The size of the SFMT generator internal state in terms of 8 bit integers.
+const SFMT_N8: usize = SFMT_N128 * 16;
 
 /// The size of the SFMT generator internal state in terms of 32 bit integers.
-const SFMT_N32: usize = SFMT_N * 4;
+const SFMT_N32: usize = SFMT_N128 * 4;
 
 /// The size of the SFMT generator internal state in terms of 64 bit integers.
-const SFMT_N64: usize = SFMT_N * 2;
+const SFMT_N64: usize = SFMT_N128 * 2;
 
 /*
  * The following constants are parameters to SFMT. These constants are specific to the selected
@@ -60,7 +61,7 @@ fn adjust(x: u32) -> usize { x as usize ^ 1 }
 /// Helper function to ensure code is endian-neutral
 #[inline(always)]
 #[cfg(target_endian = "little")]
-fn adjust(x: u32) -> usize { x as usize }
+fn adjust(x: u32) -> usize { x as usize}
 
 
 #[derive(Copy, Clone)]
@@ -94,22 +95,22 @@ impl W128 {
 
     #[inline(always)]
     unsafe fn non_sse_recursion(&mut self, a: Self, b: Self, c: Self, d: Self) {
-        let x = W128 { xx: a << SFMT_SL2 };
-        let y = W128 { xx: c << SFMT_SR2 };
+        let x = W128 { xx: a.xx << SFMT_SL2 };
+        let y = W128 { xx: c.xx << SFMT_SR2 };
         if cfg!(target_endian = "little") {
             self.ex[0] = a.ex[0] ^ x.ex[0] ^ ((b.ex[0] >> SFMT_SR1) & SFMT_MSK1)
-                ^ y.ex[0] ^ (d.u[0] << SFMT_SL1);
-            self.ex[1] = a.u[1] ^ x.ex[1] ^ ((b.ex[1] >> SFMT_SR1) & SFMT_MSK2)
-                ^ y.ex[1] ^ (d.u[1] << SFMT_SL1);
+                ^ y.ex[0] ^ (d.ex[0] << SFMT_SL1);
+            self.ex[1] = a.ex[1] ^ x.ex[1] ^ ((b.ex[1] >> SFMT_SR1) & SFMT_MSK2)
+                ^ y.ex[1] ^ (d.ex[1] << SFMT_SL1);
             self.ex[2] = a.ex[2] ^ x.ex[2] ^ ((b.ex[2] >> SFMT_SR1) & SFMT_MSK3)
                 ^ y.ex[2] ^ (d.ex[2] << SFMT_SL1);
             self.ex[3] = a.ex[3] ^ x.ex[3] ^ ((b.ex[3] >> SFMT_SR1) & SFMT_MSK4)
                 ^ y.ex[3] ^ (d.ex[3] << SFMT_SL1); 
         } else {
             self.ex[0] = a.ex[0] ^ x.ex[0] ^ ((b.ex[0] >> SFMT_SR1) & SFMT_MSK2)
-                ^ y.ex[0] ^ (d.u[0] << SFMT_SL1);
-            self.ex[1] = a.u[1] ^ x.ex[1] ^ ((b.ex[1] >> SFMT_SR1) & SFMT_MSK1)
-                ^ y.ex[1] ^ (d.u[1] << SFMT_SL1);
+                ^ y.ex[0] ^ (d.ex[0] << SFMT_SL1);
+            self.ex[1] = a.ex[1] ^ x.ex[1] ^ ((b.ex[1] >> SFMT_SR1) & SFMT_MSK1)
+                ^ y.ex[1] ^ (d.ex[1] << SFMT_SL1);
             self.ex[2] = a.ex[2] ^ x.ex[2] ^ ((b.ex[2] >> SFMT_SR1) & SFMT_MSK4)
                 ^ y.ex[2] ^ (d.ex[2] << SFMT_SL1);
             self.ex[3] = a.ex[3] ^ x.ex[3] ^ ((b.ex[3] >> SFMT_SR1) & SFMT_MSK3)
@@ -117,22 +118,28 @@ impl W128 {
         }
     }
 
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     pub fn do_recursion(&mut self, a: Self, b: Self, c: Self, d: Self) {
-        if cfg_feature_enabled!("sse2") {
-            self.sse_recursion(a, b, c, d);    
+        if is_x86_feature_detected!("sse2") {
+            unsafe { self.sse_recursion(a, b, c, d) };
         } else {
-            self.non_sse_recursion(a, b, c, d);
+            unsafe { self.non_sse_recursion(a, b, c, d) };
         }
     }
 }
 
 union SFMTState {
-    w: [W128; SFMT_N],
+    w: [W128; SFMT_N128],
     l: [u64; SFMT_N64],
-    u: [u32; SFMT_N32]
+    u: [u32; SFMT_N32],
+    b: [u8; SFMT_N8]
 }
 
 pub struct SFMTRng {
+    /// The current index into the SFMTState - the index where the next random data will be read
+    /// from.
+    /// # Important
+    /// `index` must be 4-byte aligned, since much of the code depends on that fact.
     index: usize,
     state: SFMTState,
 }
@@ -140,8 +147,8 @@ pub struct SFMTRng {
 impl SFMTRng {
     pub fn new_unseeded() -> Self {
         SFMTRng {
-            index: 0,
-            state: SFMTState { w: [W128 { xx: 0u128 }; SFMT_N] }
+            index: usize::max_value(),
+            state: SFMTState { w: [W128 { xx: 0u128 }; SFMT_N128] }
         }
     }
 
@@ -187,7 +194,7 @@ impl SFMTRng {
                 work = 0;
                 for j in 0..32 {
                     if work & PARITY[i] != 0 {
-                        state32[adjust(i)] ^= work;
+                        state32[adjust(i as u32)] ^= work;
                         return
                     }
                     work <<= 1;
@@ -198,25 +205,30 @@ impl SFMTRng {
 
     /// Fills the entire internal state with random integers.
     fn fill_state_with_rand(&mut self) {
-        let mut i = 0;
-        let mut r1 = W128 { xx: 0 };
-        let mut r2 = W128 { xx: 0 };
+        unsafe {
+            let mut i = 0;
+            let mut r1 = W128 { xx: 0 };
+            let mut r2 = W128 { xx: 0 };
 
-        let state = &mut self.state.w[..];
-        while i < (SFMT_N - SFMT_POS1) {
-            state[i].do_recursion(state[i], state[i + SFMT_POS1], r1, r2);
-            r1 = r2;
-            r2 = state[i];
-            i += 1;
-        }
-        while i < SFMT_N {
-            state[i].do_recursion(state[i], state[i + SFMT_POS1 - SFMT_N], r1, r2);
-            r1 = r2;
-            r2 = state[i];
-            i += 1;
+            let state = &mut self.state.w[..];
+            while i < (SFMT_N128 - SFMT_POS1 as usize) {
+                let (a, b) = (*state.get_unchecked(i), *state.get_unchecked(i + SFMT_POS1 as usize));
+                state.get_unchecked_mut(i)
+                    .do_recursion(a, b, r1, r2);
+                r1 = r2;
+                r2 = *state.get_unchecked(i);
+                i += 1;
+            }
+            while i < SFMT_N128 {
+                let (a, b) = (*state.get_unchecked(i), *state.get_unchecked(i + SFMT_POS1 as usize - SFMT_N128));
+                state.get_unchecked_mut(i).do_recursion(a, b, r1, r2);
+
+                r1 = r2;
+                r2 = *state.get_unchecked(i);
+                i += 1;
+            }
         }
     }
-    
 }
 
 impl Rand for SFMTRng {
@@ -227,15 +239,78 @@ impl Rand for SFMTRng {
 
 impl RngCore for SFMTRng {
     fn next_u32(&mut self) -> u32 {
-        unimplemented!()
+        if self.index >= SFMT_N32 {
+            unsafe { self.fill_state_with_rand(); }
+            self.index = 0;
+        }
+        let r = self.state.u[self.index];
+        self.index += 1;
+        r
     }
 
     fn next_u64(&mut self) -> u64 {
-        unimplemented!()
+        let r1;
+        let r2;
+
+        // Ranges in match statements with the triple dot operator '...' are inclusive
+        const SFMT_N32_MINUS_ONE: usize = SFMT_N32 - 1;
+        match self.index {
+            0 ... SFMT_N32_MINUS_ONE => {
+                r1 = self.state.u[self.index];
+                self.index += 1;
+
+                unsafe { self.fill_state_with_rand(); }
+                self.index = 1;
+
+                r2 = self.state.u[0];
+                index += 1;
+            },
+            SFMT_N32 => {
+                unsafe { self.fill_state_with_rand(); }
+
+                r1 = self.state.u[0];
+                r2 = self.state.u[1];
+                self.index = 2;
+            },
+            _ => {
+                r1 = self.state.u[self.index];
+                self.index += 1;
+                r2 = self.state.u[self.index];
+                self.index += 1;
+            }
+        };
+
+        r1 as u64 | ((r2 as u64) << 32)
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        unimplemented!()
+        let original_len = dest.len();
+        let whole_u32s = dst.len() / 4;
+        // The length in bytes of the number of whole u32's in dst. The up to 3 remaining bytes will
+        // be filled by the fill_bytes outer function
+        let truncated_len = whole_u32s * 4;
+        let mut dest = dest;
+
+        while dest.len() > 0 {
+            if cfg!(target_endian = "little") {
+                let mut data = &self.state.b[self.index..];
+                if data.len() > dest.len() {
+                    data = &data[0..dest.len()];
+                    dest.copy_from_slice(data);
+                    dest = &mut dest[data.len()..];
+                    self.index += data.len() / 4
+                        // Accounts for the fact that dest.len() might not be for-byte aligned to keep index 4 byte aligned
+                        + (data.len() & 3 == 0) as usize;
+                } else {
+                    dest[0..data.len()].copy_from_slice(data);
+                    dest = &mut data[data.len()..];
+                    self.fill_state_with_rand();
+                    self.index = 0;
+                }
+            } else {
+
+            }
+        }
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {

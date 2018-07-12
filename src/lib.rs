@@ -1,11 +1,10 @@
-#![feature(stdsimd)]
 #![feature(target_feature)]
 #![feature(cfg_target_feature)]
+#![feature(stdsimd)]
+
+#[macro_use]
+extern crate stdsimd;
 extern crate rand;
-
-#[macro_use] extern crate stdsimd;
-
-use std::simd;
 
 pub mod portable;
 

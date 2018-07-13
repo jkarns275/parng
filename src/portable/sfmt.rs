@@ -3,6 +3,11 @@ use std::mem::transmute;
 
 use rand::{self, RngCore, Rng, SeedableRng, Rand};
 
+#[cfg(target_arch = "x86")]
+use stdsimd::arch::x86::*;
+#[cfg(target_arch = "x86_64")]
+use stdsimd::arch::x86_64::*;
+
 
 /// The following implementation of the SIMD-oriented Fast Mersenne Twister algorithm is based on
 /// the C++ reference implementation located (here)[http://www.math.sci.hiroshima-u.ac.jp/~m-mat/MT/SFMT/].
@@ -65,71 +70,109 @@ fn adjust(x: u32) -> usize { x as usize}
 
 
 #[derive(Copy, Clone)]
-union W128 {
+#[repr(align(16))]
+union SFMT128 {
     xx: u128,
+    ix: __m128i,
     mx: u32x4,
     rx: [u64; 2],
     ex: [u32; 4]
 }
 
-impl W128 {
+impl SFMT128 {
     #[inline(always)]
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     unsafe fn sse_recursion(&mut self, a: Self, b: Self, c: Self, d: Self) {
-        const SSE2_PARAM_MASK: W128 = W128 { ex: [SFMT_MSK1, SFMT_MSK2, SFMT_MSK3, SFMT_MSK4] };
+        const SSE2_PARAM_MASK: SFMT128 = SFMT128 { mx: u32x4::new(SFMT_MSK1,
+                                                  SFMT_MSK2,
+                                                  SFMT_MSK3,
+                                                  SFMT_MSK4) };
+        let mut z = _mm_srli_si128(c.ix, SFMT_SR2 as i32);
+        let mut v = _mm_slli_epi32(d.ix, SFMT_SL1 as i32);
+        z = _mm_xor_si128(z, a.ix);
+        z = _mm_xor_si128(z, v);
+        let mut x = _mm_slli_si128(a.ix, SFMT_SL2 as i32);
+        let mut y = _mm_srli_epi32(b.ix, SFMT_SR1 as i32);
+        y = _mm_and_si128(y, SSE2_PARAM_MASK.ix);
+        z = _mm_xor_si128(z, x);
 
-        let (mut v, mut x, mut y, mut z) =
-            (W128 { xx: 0 }, W128 { xx: 0 }, W128 { xx: 0 }, W128 { xx: 0 });
-
-        y.mx = b.mx >> SFMT_SR1;
-        z.xx = c.xx >> SFMT_SR2;
-        v.mx = d.mx >> SFMT_SL1;
-        z.xx ^= a.xx;
-        z.xx ^= v.xx;
-        x.xx = a.xx << SFMT_SL2;
-        y.xx &= SSE2_PARAM_MASK.xx;
-        z.xx ^= x.xx;
-        z.xx ^= y.xx;
-
-        self.xx = z.xx;
+        self.ix =_mm_xor_si128(z, y);
     }
 
     #[inline(always)]
     unsafe fn non_sse_recursion(&mut self, a: Self, b: Self, c: Self, d: Self) {
-        let x = W128 { xx: a.xx << SFMT_SL2 };
-        let y = W128 { xx: c.xx << SFMT_SR2 };
-        if cfg!(target_endian = "little") {
-            self.ex[0] = a.ex[0] ^ x.ex[0] ^ ((b.ex[0] >> SFMT_SR1) & SFMT_MSK1)
-                ^ y.ex[0] ^ (d.ex[0] << SFMT_SL1);
-            self.ex[1] = a.ex[1] ^ x.ex[1] ^ ((b.ex[1] >> SFMT_SR1) & SFMT_MSK2)
-                ^ y.ex[1] ^ (d.ex[1] << SFMT_SL1);
-            self.ex[2] = a.ex[2] ^ x.ex[2] ^ ((b.ex[2] >> SFMT_SR1) & SFMT_MSK3)
-                ^ y.ex[2] ^ (d.ex[2] << SFMT_SL1);
-            self.ex[3] = a.ex[3] ^ x.ex[3] ^ ((b.ex[3] >> SFMT_SR1) & SFMT_MSK4)
-                ^ y.ex[3] ^ (d.ex[3] << SFMT_SL1); 
-        } else {
-            self.ex[0] = a.ex[0] ^ x.ex[0] ^ ((b.ex[0] >> SFMT_SR1) & SFMT_MSK2)
-                ^ y.ex[0] ^ (d.ex[0] << SFMT_SL1);
-            self.ex[1] = a.ex[1] ^ x.ex[1] ^ ((b.ex[1] >> SFMT_SR1) & SFMT_MSK1)
-                ^ y.ex[1] ^ (d.ex[1] << SFMT_SL1);
-            self.ex[2] = a.ex[2] ^ x.ex[2] ^ ((b.ex[2] >> SFMT_SR1) & SFMT_MSK4)
-                ^ y.ex[2] ^ (d.ex[2] << SFMT_SL1);
-            self.ex[3] = a.ex[3] ^ x.ex[3] ^ ((b.ex[3] >> SFMT_SR1) & SFMT_MSK3)
-                ^ y.ex[3] ^ (d.ex[3] << SFMT_SL1);        
-        }
+        let x = SFMT128 { xx: a.xx << (SFMT_SL2 * 8) };
+        let y = SFMT128 { xx: c.xx << (SFMT_SR2 * 8) };
+        self.ex[0] = a.ex[0] ^ x.ex[0] ^ ((b.ex[0] >> SFMT_SR1) & SFMT_MSK1)
+            ^ y.ex[0] ^ (d.ex[0] << SFMT_SL1);
+        self.ex[1] = a.ex[1] ^ x.ex[1] ^ ((b.ex[1] >> SFMT_SR1) & SFMT_MSK2)
+            ^ y.ex[1] ^ (d.ex[1] << SFMT_SL1);
+        self.ex[2] = a.ex[2] ^ x.ex[2] ^ ((b.ex[2] >> SFMT_SR1) & SFMT_MSK3)
+            ^ y.ex[2] ^ (d.ex[2] << SFMT_SL1);
+        self.ex[3] = a.ex[3] ^ x.ex[3] ^ ((b.ex[3] >> SFMT_SR1) & SFMT_MSK4)
+            ^ y.ex[3] ^ (d.ex[3] << SFMT_SL1);
+
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     pub fn do_recursion(&mut self, a: Self, b: Self, c: Self, d: Self) {
-        //if is_x86_feature_detected!("sse2") {
-        //    unsafe { self.sse_recursion(a, b, c, d) };
-        //} else {
-            unsafe { self.non_sse_recursion(a, b, c, d) };
-        //}
+//        if is_x86_feature_detected!("sse2") {
+//            unsafe { self.sse_recursion(a, b,
+//                                        c, d) };
+//        } else {
+          unsafe { self.non_sse_recursion(a, b, c, d) };
+//        }
     }
 }
 
+pub fn test1() {
+    use std::time::*;
+    let start = Instant::now();
+    let mut a = SFMT128 { xx: 124656 };
+    let mut b = SFMT128 { xx: 1234 };
+    let mut c = SFMT128 { xx: 53321 };
+    let mut d = SFMT128 { xx: 121 };
+    let mut r = SFMT128 { xx: 1243565 };
+    for i in 0..1000 {
+        unsafe {
+            r.sse_recursion(a, b, c, d);
+            a.sse_recursion(r, b, c, d);
+            b.sse_recursion(a, r, c, d);
+            c.sse_recursion(a, b, r, d);
+            d.sse_recursion(a, b, c, r);
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let duration = (elapsed.as_nanos() as f64) / 1e9;
+    println!("sse Took {}s", duration);
+}
+
+pub fn test2() {
+        use std::time::*;
+    let start = Instant::now();
+    let mut a = SFMT128 { xx: 124656 };
+    let mut b = SFMT128 { xx: 1234 };
+    let mut c = SFMT128 { xx: 53321 };
+    let mut d = SFMT128 { xx: 121 };
+    let mut r = SFMT128 { xx: 1243565 };
+    for i in 0..1000 {
+        unsafe {
+            r.non_sse_recursion(a, b, c, d);
+            a.non_sse_recursion(r, b, c, d);
+            b.non_sse_recursion(a, r, c, d);
+            c.non_sse_recursion(a, b, r, d);
+            d.non_sse_recursion(a, b, c, r);
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let duration = (elapsed.as_nanos() as f64) / 1e9;
+    println!("non-sse Took {}s", duration);
+}
+
 union SFMTState {
-    w: [W128; SFMT_N128],
+    w: [SFMT128; SFMT_N128],
     l: [u64; SFMT_N64],
     u: [u32; SFMT_N32],
     b: [u8; SFMT_N8]
@@ -148,7 +191,7 @@ impl SFMTRng {
     pub fn new_unseeded() -> Self {
         SFMTRng {
             index: usize::max_value(),
-            state: SFMTState { w: [W128 { xx: 0u128 }; SFMT_N128] }
+            state: SFMTState { w: [SFMT128 { xx: 0u128 }; SFMT_N128] }
         }
     }
 
@@ -205,7 +248,6 @@ impl SFMTRng {
 
     /// Fills the entire internal state with random integers.
     fn fill_state_with_rand(&mut self) {
-        println!("<<<<<<<<<<<<<<<<<<<<<<<<<<<Filling");
         unsafe {
             let mut i = 0;
             let mut r1 = self.state.w[SFMT_N128 - 2];

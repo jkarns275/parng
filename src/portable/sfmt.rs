@@ -120,11 +120,11 @@ impl W128 {
 
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     pub fn do_recursion(&mut self, a: Self, b: Self, c: Self, d: Self) {
-        if is_x86_feature_detected!("sse2") {
-            unsafe { self.sse_recursion(a, b, c, d) };
-        } else {
+        //if is_x86_feature_detected!("sse2") {
+        //    unsafe { self.sse_recursion(a, b, c, d) };
+        //} else {
             unsafe { self.non_sse_recursion(a, b, c, d) };
-        }
+        //}
     }
 }
 
@@ -154,7 +154,7 @@ impl SFMTRng {
 
     pub fn new(seed: u32) -> Self {
         // Unsafe is used to turn the seed into an array of 4 bytes, which is then used as the seed.
-        Self::from_seed(unsafe { transmute(seed) })
+        Self::from_seed(unsafe { transmute(seed.to_le()) })
     }
 
     /// Guarantees that the period of the series is 2^SFMT_MEXP
@@ -191,7 +191,7 @@ impl SFMTRng {
             if inner_product == 1 { return }
 
             for i in 0..4 {
-                work = 0;
+                work = 1;
                 for j in 0..32 {
                     if work & PARITY[i] != 0 {
                         state32[adjust(i as u32)] ^= work;
@@ -205,10 +205,11 @@ impl SFMTRng {
 
     /// Fills the entire internal state with random integers.
     fn fill_state_with_rand(&mut self) {
+        println!("<<<<<<<<<<<<<<<<<<<<<<<<<<<Filling");
         unsafe {
             let mut i = 0;
-            let mut r1 = W128 { xx: 0 };
-            let mut r2 = W128 { xx: 0 };
+            let mut r1 = self.state.w[SFMT_N128 - 2];
+            let mut r2 = self.state.w[SFMT_N128 - 1];
 
             let state = &mut self.state.w[..];
             while i < (SFMT_N128 - SFMT_POS1 as usize) {
@@ -233,7 +234,7 @@ impl SFMTRng {
 
 impl Rand for SFMTRng {
     fn rand<R: Rng>(rng: &mut R) -> Self {
-        unimplemented!()
+        Self::new(rng.next_u32())
     }
 }
 
@@ -243,78 +244,80 @@ impl RngCore for SFMTRng {
             unsafe { self.fill_state_with_rand(); }
             self.index = 0;
         }
-        let r = self.state.u[self.index];
+        let r = unsafe { self.state.u[self.index] };
         self.index += 1;
         r
     }
 
     fn next_u64(&mut self) -> u64 {
-        let r1;
-        let r2;
-
         // Ranges in match statements with the triple dot operator '...' are inclusive
         const SFMT_N32_MINUS_ONE: usize = SFMT_N32 - 1;
         match self.index {
             0 ... SFMT_N32_MINUS_ONE => {
-                r1 = self.state.u[self.index];
+                let r1 = unsafe { self.state.u[self.index] } as u64;
                 self.index += 1;
 
                 unsafe { self.fill_state_with_rand(); }
                 self.index = 1;
 
-                r2 = self.state.u[0];
-                index += 1;
+                let r2 = unsafe { self.state.u[0] } as u64;
+                self.index += 1;
+
+                r1 as u64 | ((r2 as u64) << 32)
             },
             SFMT_N32 => {
                 unsafe { self.fill_state_with_rand(); }
-
-                r1 = self.state.u[0];
-                r2 = self.state.u[1];
+                let r = unsafe { self.state.l[self.index / 2] };
                 self.index = 2;
+                r
             },
             _ => {
-                r1 = self.state.u[self.index];
-                self.index += 1;
-                r2 = self.state.u[self.index];
-                self.index += 1;
+                let r = unsafe { self.state.l[self.index / 2] };
+                self.index += 2;
+                r
             }
-        };
-
-        r1 as u64 | ((r2 as u64) << 32)
+        }
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
         let original_len = dest.len();
-        let whole_u32s = dst.len() / 4;
+        let whole_u32s = dest.len() / 4;
         // The length in bytes of the number of whole u32's in dst. The up to 3 remaining bytes will
         // be filled by the fill_bytes outer function
         let truncated_len = whole_u32s * 4;
         let mut dest = dest;
 
         while dest.len() > 0 {
-            if cfg!(target_endian = "little") {
-                let mut data = &self.state.b[self.index..];
+            {
+                let mut data = unsafe { &self.state.b[self.index..] };
                 if data.len() > dest.len() {
                     data = &data[0..dest.len()];
                     dest.copy_from_slice(data);
-                    dest = &mut dest[data.len()..];
+                    let temp = dest;
+                    dest = &mut temp[data.len()..];
                     self.index += data.len() / 4
                         // Accounts for the fact that dest.len() might not be for-byte aligned to keep index 4 byte aligned
                         + (data.len() & 3 == 0) as usize;
+                    continue;
                 } else {
                     dest[0..data.len()].copy_from_slice(data);
-                    dest = &mut data[data.len()..];
-                    self.fill_state_with_rand();
-                    self.index = 0;
+                    let temp = dest;
+                    dest = &mut temp[data.len()..];
                 }
-            } else {
-
             }
+            self.fill_state_with_rand();
+            self.index = 0;
+        }
+
+        if self.index >= SFMT_N32 {
+            self.fill_state_with_rand();
+            self.index = 0;
         }
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        unimplemented!()
+        self.fill_bytes(dest);
+        return Ok(())
     }
 }
 
@@ -334,11 +337,12 @@ impl SeedableRng for SFMTRng {
             let mut i = 1u32;
             while i < SFMT_N32 as u32 {
                 let new_value =
-                    FACTOR * (*state32.get_unchecked(adjust(i - 1))
-                              ^ (*state32.get_unchecked(adjust(i - 1)) >> 30)) + i;
+                    FACTOR.wrapping_mul(*state32.get_unchecked(adjust(i - 1))
+                              ^ (*state32.get_unchecked(adjust(i - 1)) >> 30)).wrapping_add(i);
                 i += 1;
             }
         }
+        unsafe { result.fill_state_with_rand() };
         result.index = SFMT_N32;
         result.period_certification();
         result

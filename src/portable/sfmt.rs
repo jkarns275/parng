@@ -128,18 +128,21 @@ impl SFMT128 {
 pub fn test1() {
     use std::time::*;
     let start = Instant::now();
-    let mut a = SFMT128 { xx: 124656 };
+    let mut a = SFMT128 { xx: start.elapsed().as_nanos() };
     let mut b = SFMT128 { xx: 1234 };
     let mut c = SFMT128 { xx: 53321 };
     let mut d = SFMT128 { xx: 121 };
     let mut r = SFMT128 { xx: 1243565 };
-    for i in 0..1000 {
+    for i in 0..1024*1024 {
         unsafe {
             r.sse_recursion(a, b, c, d);
             a.sse_recursion(r, b, c, d);
             b.sse_recursion(a, r, c, d);
             c.sse_recursion(a, b, r, d);
             d.sse_recursion(a, b, c, r);
+            if a.xx == 0 {
+                println!("bad");
+            }
         }
     }
 
@@ -151,18 +154,21 @@ pub fn test1() {
 pub fn test2() {
         use std::time::*;
     let start = Instant::now();
-    let mut a = SFMT128 { xx: 124656 };
+    let mut a = SFMT128 { xx: start.elapsed().as_nanos() };
     let mut b = SFMT128 { xx: 1234 };
     let mut c = SFMT128 { xx: 53321 };
     let mut d = SFMT128 { xx: 121 };
     let mut r = SFMT128 { xx: 1243565 };
-    for i in 0..1000 {
+    for i in 0..1024*1024 {
         unsafe {
             r.non_sse_recursion(a, b, c, d);
             a.non_sse_recursion(r, b, c, d);
             b.non_sse_recursion(a, r, c, d);
             c.non_sse_recursion(a, b, r, d);
             d.non_sse_recursion(a, b, c, r);
+            if a.xx == 0 {
+                println!("bad");
+            }
         }
     }
 

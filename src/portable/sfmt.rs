@@ -89,10 +89,10 @@ impl SFMT128 {
                                                   SFMT_MSK4) };
         let mut z = _mm_srli_si128(c.ix, SFMT_SR2 as i32);
         let mut v = _mm_slli_epi32(d.ix, SFMT_SL1 as i32);
-        z = _mm_xor_si128(z, a.ix);
-        z = _mm_xor_si128(z, v);
         let mut x = _mm_slli_si128(a.ix, SFMT_SL2 as i32);
         let mut y = _mm_srli_epi32(b.ix, SFMT_SR1 as i32);
+        z = _mm_xor_si128(z, a.ix);
+        z = _mm_xor_si128(z, v);
         y = _mm_and_si128(y, SSE2_PARAM_MASK.ix);
         z = _mm_xor_si128(z, x);
 

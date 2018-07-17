@@ -1,5 +1,5 @@
 
 mod sfmt;
-mod xorwow;
+mod xorshift;
 pub use self::sfmt::*;
-pub use self::xorwow::*;
+pub use self::xorshift::*;
